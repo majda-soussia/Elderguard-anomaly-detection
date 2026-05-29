@@ -1,0 +1,145 @@
+import os
+import sys
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import pandas as pd
+from torch.utils.data import DataLoader, TensorDataset
+from sklearn.model_selection import train_test_split
+
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+if project_root not in sys.path:
+    sys.path.append(project_root)
+
+from src.training.autoencoder import Autoencoder
+
+# ─────────────────────────────────────────────
+# CONFIGURATION
+# ─────────────────────────────────────────────
+
+PROCESSED_PATH = os.path.join(project_root, "data", "processed", "processed_refit_dataset.csv")
+SAVE_PATH      = os.path.join(project_root, "models", "saved_models")
+MODEL_NAME     = "autoencoder_refit_best.pth"
+VAL_DIR        = os.path.join(project_root, "data", "validation")
+VAL_FILE       = "refit_validation_dataset.csv"
+
+BATCH_SIZE  = 32
+NUM_EPOCHS  = 100
+LR          = 0.001
+PATIENCE    = 10
+
+
+# ─────────────────────────────────────────────
+# TRAIN
+# ─────────────────────────────────────────────
+
+def train():
+    print("=" * 60)
+    print("  Training Autoencoder on REFIT Dataset")
+    print("=" * 60)
+
+    os.makedirs(SAVE_PATH, exist_ok=True)
+    os.makedirs(VAL_DIR,   exist_ok=True)
+
+    if not os.path.exists(PROCESSED_PATH):
+        print(f"File not found: {PROCESSED_PATH}")
+        print("   Please run preprocess_refit2.py first.")
+        return
+
+    # ── Charger les données
+    print("\nLoading data...")
+    df               = pd.read_csv(PROCESSED_PATH)
+    consumption_cols = [f"m_{i}" for i in range(1, 1441)]
+    data             = df[consumption_cols].values
+
+    print(f"  Total days loaded : {len(data)}")
+    print(f"  Houses            : {df['House'].nunique()}")
+
+    # ── Split 70% train / 20% val / 10% test
+    data_tensor                  = torch.tensor(data, dtype=torch.float32)
+    train_data, temp_data        = train_test_split(data_tensor, test_size=0.3,  random_state=42)
+    val_data,   test_data        = train_test_split(temp_data,   test_size=1/3,  random_state=42)
+
+    print(f"\n  Split → Train: {len(train_data)} | Val: {len(val_data)} | Test: {len(test_data)}")
+
+    # ── Sauvegarder le dataset de validation
+    val_df   = pd.DataFrame(val_data.numpy(), columns=consumption_cols)
+    val_path = os.path.join(VAL_DIR, VAL_FILE)
+    val_df.to_csv(val_path, index=False)
+    print(f"  Validation dataset saved: {val_path}")
+
+    # ── DataLoaders
+    train_loader = DataLoader(TensorDataset(train_data), batch_size=BATCH_SIZE, shuffle=True)
+    val_loader   = DataLoader(TensorDataset(val_data),   batch_size=BATCH_SIZE, shuffle=False)
+
+    # ── Modèle
+    model     = Autoencoder(input_dim=1440)
+    criterion = nn.MSELoss()
+    optimizer = optim.Adam(model.parameters(), lr=LR)
+
+    print(f"\n  Model     : Dense Autoencoder (1440→512→128→32→128→512→1440)")
+    print(f"  Optimizer : Adam (lr={LR})")
+    print(f"  Batch     : {BATCH_SIZE}")
+    print(f"  Max epochs: {NUM_EPOCHS}")
+    print(f"  Patience  : {PATIENCE}")
+    print("\n" + "=" * 60)
+    print("  Starting training...")
+    print("=" * 60 + "\n")
+
+    best_val_loss    = float("inf")
+    epochs_no_improve = 0
+
+    for epoch in range(NUM_EPOCHS):
+
+        # ── Train
+        model.train()
+        total_train_loss = 0
+        for batch in train_loader:
+            inputs = batch[0]
+            optimizer.zero_grad()
+            outputs = model(inputs)
+            loss    = criterion(outputs, inputs)
+            loss.backward()
+            optimizer.step()
+            total_train_loss += loss.item()
+
+        avg_train_loss = total_train_loss / len(train_loader)
+
+        # ── Validation
+        model.eval()
+        total_val_loss = 0
+        with torch.no_grad():
+            for batch in val_loader:
+                inputs  = batch[0]
+                outputs = model(inputs)
+                loss    = criterion(outputs, inputs)
+                total_val_loss += loss.item()
+
+        avg_val_loss = total_val_loss / len(val_loader)
+
+        print(f"Epoch [{epoch+1:3d}/{NUM_EPOCHS}] "
+              f"Train Loss: {avg_train_loss:.6f} | "
+              f"Val Loss: {avg_val_loss:.6f}", end="")
+
+        # ── Early stopping
+        if avg_val_loss < best_val_loss:
+            best_val_loss    = avg_val_loss
+            epochs_no_improve = 0
+            torch.save(model.state_dict(), os.path.join(SAVE_PATH, MODEL_NAME))
+            print("  ← best ")
+        else:
+            epochs_no_improve += 1
+            print()
+            if epochs_no_improve >= PATIENCE:
+                print(f"\n  Early stopping after {PATIENCE} epochs without improvement.")
+                break
+
+    print(f"\n{'='*60}")
+    print(f"  Training completed!")
+    print(f"  Best Val Loss : {best_val_loss:.6f}")
+    print(f"  Model saved   : {os.path.join(SAVE_PATH, MODEL_NAME)}")
+    print(f"{'='*60}")
+
+
+if __name__ == "__main__":
+    train()
