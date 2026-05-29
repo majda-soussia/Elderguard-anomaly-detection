@@ -1,0 +1,2 @@
+*.csv filter=lfs diff=lfs merge=lfs -text
+data/validation/cnn_refit_validation_dataset.csv filter=lfs diff=lfs merge=lfs -text
